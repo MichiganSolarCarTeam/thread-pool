@@ -5,39 +5,45 @@ UMSCT's in house C++20 thread pool library. This library is designed to be light
 ## Basic Usage
 
 ```cpp
-#include "ThreadPool.h"
-
-ThreadPool pool(4); // Create a thread pool with 4 threads
-
-// Detach a task
-pool.detach_task([]() {
-    std::cout << "Hello, World!" << std::endl;
-});
-
-// Detach a batch of tasks
+#include <vector>
+#include <iostream>
 #include <vector>
 #include <functional>
-std::vector<std::function<void()>> tasks;
-for (int i = 0; i < 10; i++) {
-    tasks.push_back([i]() {
-        std::cout << "Hello, World! " << i << std::endl;
+
+#include "ThreadPool.hpp"
+
+
+int main() {
+    ThreadPool pool(4); // Create a thread pool with 4 threads
+
+    // Detach a task
+    pool.detach_task([]() {
+        std::cout << "Hello, World!" << std::endl;
     });
-}
 
-// This is more efficient than detaching each task individually
-pool.detach_tasks(tasks);
-
-// Detach a task with other containers
-std::function<void()> tasks[] = {
-    []() {
-        std::cout << "Hello, World!" << std::endl;
-    },
-    []() {
-        std::cout << "Hello, World!" << std::endl;
+    // Detach a batch of tasks
+    std::vector<std::function<void()>> tasks;
+    for (int i = 0; i < 10; i++) {
+        tasks.push_back([i]() {
+            std::cout << "Hello, World! " << i << std::endl;
+        });
     }
-};
 
-pool.detach_tasks(tasks, 2);
+    // This is more efficient than detaching each task individually
+    pool.detach_tasks(std::move(tasks));
+
+    // Detach a task with other containers
+    std::function<void()> arr_tasks[] = {
+        []() {
+            std::cout << "Hello, World!" << std::endl;
+        },
+        []() {
+            std::cout << "Hello, World!" << std::endl;
+        }
+    };
+
+    pool.detach_tasks(arr_tasks, 2);
+}
 ```
 
 ## Advanced Usage
@@ -50,32 +56,39 @@ Here is an example of how to synchronize tasks:
 #include <semaphore>
 #include <mutex>
 #include <vector>
+#include <iostream>
 
-#include "ThreadPool.h"
-
-ThreadPool pool(4); // Create a thread pool with 4 threads
+#include "ThreadPool.hpp"
 
 
-std::mutex mtx;
-std::semaphore sem(0);
+int main() {
+    ThreadPool pool(4); // Create a thread pool with 4 threads
 
-// Generate a batch of tasks
-std::vector<std::function<void()>> tasks;
-for (int i = 0; i < 10; i++) {
-    tasks.push_back([i]() {
-        std::cout << "Hello, World! " << i << std::endl;
-        std::lock_guard<std::mutex> lock(mtx);
-        sem.release();
-    });
+    std::mutex mtx;
+    std::counting_semaphore sem(0);
+
+    // Generate a batch of tasks
+    std::vector<std::function<void()>> tasks;
+    for (int i = 0; i < 10; i++) {
+        tasks.push_back([&]() {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                std::cout << "Hello, World! " << i << std::endl;
+            }
+            
+            sem.release();
+        });
+    }
+
+    // Detach the tasks
+    pool.detach_tasks(std::move(tasks));
+
+    // Wait for all tasks to finish
+    for (int i = 0; i < 10; i++) {
+        sem.acquire();
+    }
 }
 
-// Detach the tasks
-pool.detach_tasks(tasks);
-
-// Wait for all tasks to finish
-for (int i = 0; i < 10; i++) {
-    sem.acquire();
-}
 
 ```
 
