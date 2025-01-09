@@ -33,20 +33,60 @@
 #include <functional>
 #include <mutex>
 #include <queue>
+#include <semaphore>
+#include <span>
 #include <thread>
-#include <vector>
 
 /*
  * University of Michigan Solar Car Team
  *
  * Light weight C++20 thread pool implementation
  *
+ *
+ * High level API:
+ *
+ * There are two APIs for adding tasks to the thread pool: blocking and non-blocking.
+ *
+ * The non-blocking API is used when you want to add a task to the thread pool and continue execution.
+ *
+ * The blocking API is used when you want to add a task to the thread pool and wait for it to finish.
+ *
+ * Within the non-blocking API, there are two functions:
+ *      detach_task - used to add a single task to the thread pool
+ *      detach_tasks - used to add multiple tasks to the thread pool
+ *
+ * Within the blocking API, there are two functions:
+ *      run_tasks - used to add multiple tasks to the thread pool and wait for them to finish
+ *      run_loop - used to add a loop of tasks to the thread pool and wait for them to finish (syntax sugar)
+ *
  */
+
+template <typename>
+struct extract_argument;
+
+template <typename T>
+struct extract_argument<std::function<void(T)>> {
+	using type = T;
+};
+
+template <>
+struct extract_argument<std::function<void()>> {
+	using type = void;
+};
+
+template <typename Func>
+using extract_argument_t = typename extract_argument<Func>::type;
 
 class ThreadPool {
    public:
 	ThreadPool() {
 		reset(std::thread::hardware_concurrency());
+	}
+
+	/// @brief  Construct a thread pool with a specific number of threads
+	/// @param num_threads Number of threads for the pool
+	explicit ThreadPool(size_t num_threads) {
+		reset(num_threads);
 	}
 
 	~ThreadPool() {
@@ -57,16 +97,9 @@ class ThreadPool {
 		}
 	}
 
-	/// @brief  Construct a thread pool with a specific number of threads
+	/// @brief  Reset the number of threads in the pool
 	/// @param num_threads Number of threads for the pool
-	explicit ThreadPool(size_t num_threads) {
-		reset(num_threads);
-	}
-
-	
-    /// @brief  Reset the number of threads in the pool
-    /// @param num_threads Number of threads for the pool
-    /// @throws std::runtime_error if the number of threads is less than the current number of threads
+	/// @throws std::runtime_error if the number of threads is less than the current number of threads
 	void reset(size_t num_threads) {
 		if (num_threads >= threads.size()) {
 			size_t i = threads.size();
@@ -78,38 +111,89 @@ class ThreadPool {
 		throw std::runtime_error("Cannot downscale thread pool");
 	}
 
-    /// @brief  Get the number of threads in the pool
-	size_t size() {
+	/// @brief  Get the number of threads in the pool
+	size_t size() const {
 		return threads.size();
 	}
+
+	// ********** Non-blocking API **********
 
 	/// @brief Add a task to the thread pool
 	/// @param task The task to be added
 	void detach_task(std::function<void()>&& task) {
-		std::unique_lock<std::mutex> lock(data_lock);
-		jobs.push({std::move(task)});
+		{
+			std::scoped_lock<std::mutex> lock(data_lock);
+			jobs.emplace(std::move(task));
+		}
 		cv.notify_one();
 	}
 
-    /// @brief Adds tasks to the thread pool
-    /// @param tasks A vector of tasks to be added
-	void detach_tasks(std::vector<std::function<void()>>&& tasks) {
-		std::unique_lock<std::mutex> lock(data_lock);
-		for (auto& task : tasks) {
-			jobs.push({std::move(task)});
+	/// @brief Adds tasks to the thread pool
+	/// @param tasks A container of tasks to be added (not valid after this function returns)
+	void detach_tasks(std::span<std::function<void()>> tasks) {
+		{
+			std::scoped_lock<std::mutex> lock(data_lock);
+			for (auto& task : tasks) {
+				jobs.emplace(std::move(task));
+			}
 		}
 		cv.notify_all();
 	}
 
-    /// @brief Adds tasks to the thread pool
-    /// @param tasks An array of tasks to be added
-    /// @param num_tasks The number of tasks in the array
-	void detach_tasks(std::function<void()>* tasks, size_t num_tasks) {
-		std::unique_lock<std::mutex> lock(data_lock);
-		for (size_t i = 0; i < num_tasks; i++) {
-			jobs.push({std::move(tasks[i])});
+	// ********** Blocking API **********
+
+	/// @brief Adds tasks to the thread pool and waits for them to finish
+	/// @param tasks A container of tasks to be added (not valid after this function returns)
+	void run_tasks(std::span<std::function<void()>> tasks) {
+		std::counting_semaphore sem(0);
+		{
+			std::scoped_lock<std::mutex> lock(data_lock);
+			for (auto& task : tasks) {
+				jobs.emplace([&]() {
+					task();
+					sem.release();
+				});
+			}
 		}
 		cv.notify_all();
+		for (size_t i = 0; i < tasks.size(); i++) {
+			sem.acquire();
+		}
+	}
+
+	/// @brief Adds tasks to the thread pool and waits for them to finish
+	/// @param start The start index of the loop
+	/// @param end The end index of the loop
+	/// @param loop_body The body of the loop
+	///
+	/// This is equivalent to:
+	///
+	/// for (size_t i = start; i < end; i++) {
+	///		 loop_body();
+	/// }
+	template <typename Func, typename arg_type = extract_argument_t<Func>>
+		requires(std::is_invocable_r_v<void, Func, arg_type> && std::is_integral_v<arg_type>) ||
+				std::is_invocable_r_v<void, Func>
+	void run_loop(size_t start, size_t end, Func&& loop_body) {
+		using induction_type = std::conditional_t<std::is_invocable_v<Func>, size_t, arg_type>;
+		std::counting_semaphore sem(0);
+		{
+			std::scoped_lock<std::mutex> lock(data_lock);
+			for (induction_type i = start; i < end; ++i) {
+				jobs.emplace([&, i]() {
+					if constexpr (std::is_invocable_v<Func>) {
+						loop_body();
+					} else {
+						loop_body(i);
+					}
+					sem.release();
+				});
+			}
+		}
+		cv.notify_all();
+		for (size_t i = start; i < end; i++) {
+			sem.acquire();
+		}
 	}
 
    private:
