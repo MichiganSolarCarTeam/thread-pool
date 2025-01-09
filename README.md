@@ -30,7 +30,7 @@ int main() {
                 std::cout << "Hello, World! " << i << std::endl;
             });
         }
-        pool.detach_tasks(tasks);
+        pool.detach_tasks(std::move(tasks));
     }
     
     // Wait for tasks to finish
@@ -43,13 +43,13 @@ int main() {
                 std::cout << "Hello, World! " << i << std::endl;
             });
         }
-        pool.run_tasks(tasks); // block until all tasks are done
+        pool.run_tasks(std::move(tasks)); // block until all tasks are done
 
         // You could have also done this
         auto loop = tasks.push_back([](size_t i) {
             std::cout << "Hello, World! " << i << std::endl; 
         });
-        pool.run_loop(0, 10, loop); // block until all tasks are done
+        pool.run_loop(0, 10, std::function(loop)); // block until all tasks are done
     }
     
 
